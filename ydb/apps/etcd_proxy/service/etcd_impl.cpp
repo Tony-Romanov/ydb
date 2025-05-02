@@ -202,7 +202,7 @@ struct TRange : public TOperation {
     }
 };
 
-using TNotifier = std::function<void(std::string&&, i64, NEtcd::TData&&, NEtcd::TData&&)>;
+using TNotifier = std::function<void(std::string&&, i64, TData&&, TData&&)>;
 using TGrpcError = std::pair<grpc::StatusCode, std::string>;
 
 struct TPut : public TOperation {
@@ -320,7 +320,7 @@ struct TPut : public TOperation {
             }
         }
         if (NotifyWatchtower && notifier) {
-            NEtcd::TData oldData, newData;
+            TData oldData, newData;
             if (auto parser = NYdb::TResultSetParser(results[ResultIndex]); parser.TryNextRow() && 5ULL == parser.ColumnsCount()) {
                 oldData.Value = NYdb::TValueParser(parser.GetValue("value")).GetString();
                 oldData.Created = NYdb::TValueParser(parser.GetValue("created")).GetInt64();
@@ -427,7 +427,7 @@ struct TDeleteRange : public TOperation {
 
         if (NotifyWatchtower && notifier) {
             for (auto parser = NYdb::TResultSetParser(results[ResultIndex + 1U]); parser.TryNextRow();) {
-                NEtcd::TData oldData {
+                TData oldData {
                     .Value = NYdb::TValueParser(parser.GetValue("value")).GetString(),
                     .Created = NYdb::TValueParser(parser.GetValue("created")).GetInt64(),
                     .Modified = NYdb::TValueParser(parser.GetValue("modified")).GetInt64(),
@@ -523,8 +523,6 @@ struct TTxn : public TOperation {
     std::vector<TCompare> Compares;
     std::vector<TRequestOp> Success, Failure;
 
-    using TKeysSet = std::unordered_set<std::pair<std::string, std::string>>;
-
     std::ostream& Dump(std::ostream& out) const {
         const auto dump = [](const std::vector<TRequestOp>& operations, std::ostream& out) {
             for (const auto& operation : operations) {
@@ -555,6 +553,26 @@ struct TTxn : public TOperation {
         }
         out << ')';
         return out;
+    }
+
+    bool IsReadOnly() const {
+        for (const auto& operation : Success) {
+            if (const auto oper = std::get_if<TTxn>(&operation)) {
+                if (!oper->IsReadOnly())
+                    return false;
+            } else if (!std::get_if<TRange>(&operation))
+                return false;
+        }
+
+        for (const auto& operation : Failure) {
+            if (const auto oper = std::get_if<TTxn>(&operation)) {
+                if (!oper->IsReadOnly())
+                    return false;
+            } else if (!std::get_if<TRange>(&operation))
+                return false;
+        }
+
+        return true;
     }
 
     void GetKeys(TKeysSet& keys) const {
@@ -728,7 +746,6 @@ struct TTxn : public TOperation {
             sql << ';' << std::endl;
             sql << "select * from " << cmpResultSetName << ';' << std::endl;
 
-
             const auto& scalarSuccessName = GetNameWithIndex("Success", resultsCounter);
             const auto& scalarFailureName = GetNameWithIndex("Failure", resultsCounter);
 
@@ -790,6 +807,8 @@ protected:
     virtual void MakeQueryWithParams(std::ostream& sql, NYdb::TParamsBuilder& params) = 0;
     virtual void ReplyWith(const NYdb::TResultSets& results, const TActorContext& ctx) = 0;
     virtual bool ExecuteAsync() const { return false; }
+    virtual bool RequiredNextRevision() const { return false; }
+    virtual TKeysSet GetAffectedKeysSet() const { return {}; }
 
     i64 Revision = 0LL;
 };
@@ -811,8 +830,10 @@ public:
         if (const auto& error = this->ParseGrpcRequest(); !error.empty()) {
             this->Request_->ReplyWithRpcStatus(grpc::StatusCode::INVALID_ARGUMENT, TString(error));
             this->Die(ctx);
+        } else if (this->RequiredNextRevision()) {
+            this->Become(&TEtcdRequestGrpc::WaitRevisionFunc);
+            ctx.Send(Stuff->MainGate, new TEvRequestRevision(this->GetAffectedKeysSet()));
         } else {
-            this->Become(&TEtcdRequestGrpc::StateFunc);
             SendDatabaseRequest(ctx);
         }
     }
@@ -829,15 +850,21 @@ private:
         sql << "-- " << GetRequestName() << " >>>>" << std::endl;
         sql << Stuff->TablePrefix;
         this->MakeQueryWithParams(sql, params);
+        if (this->RequiredNextRevision())
+            sql << "insert into `commited` (`revision`,`timestamp`) values ($Revision,CurrentUtcDatetime());" << std::endl;
+        else
+            sql << "select nvl(max(`revision`), 0L) from `commited`;" << std::endl;
         sql << "-- " << GetRequestName() << " <<<<" << std::endl;
 //      std::cout << std::endl << sql.view() << std::endl;
 
         return [query = sql.str(), args = params.Build()](TQueryClient::TSession session) -> TAsyncExecuteQueryResult {
-            return session.ExecuteQuery(query, TTxControl::BeginTx().CommitTx(), args, TExecuteQuerySettings().StatsMode(EStatsMode::Basic));
+            return session.ExecuteQuery(query, TTxControl::BeginTx().CommitTx(), args);
         };
     }
 
     void SendDatabaseRequest(const TActorContext& ctx) {
+        this->Become(&TEtcdRequestGrpc::WaitResultFunc);
+
         if (this->ExecuteAsync()) {
             Stuff->Client->RetryQuery(GetQueryResultFunc()).Subscribe([name = GetRequestName()](const auto& future) {
                 if (const auto res = future.GetValue(); res.IsSuccess())
@@ -845,31 +872,48 @@ private:
                 else
                     std::cout << name << " finished with errors: " << res.GetIssues().ToString() << std::endl;
             });
-            ctx.Send(this->SelfId(), new NEtcd::TEvQueryResult);
+            ctx.Send(this->SelfId(), new TEvQueryResult);
         } else {
             Stuff->Client->RetryQuery(GetQueryResultFunc()).Subscribe([my = this->SelfId(), stuff = TSharedStuff::TWeakPtr(Stuff)](const auto& future) {
                 if (const auto lock = stuff.lock()) {
                     if (const auto res = future.GetValue(); res.IsSuccess())
-                        lock->ActorSystem->Send(my, new NEtcd::TEvQueryResult(res.GetResultSets()));
+                        lock->ActorSystem->Send(my, new TEvQueryResult(res.GetResultSets()));
                     else
-                        lock->ActorSystem->Send(my, new NEtcd::TEvQueryError(res.GetIssues()));
+                        lock->ActorSystem->Send(my, new TEvQueryError(res.GetIssues()));
                 }
             });
         }
     }
 
-    STFUNC(StateFunc) {
+    STFUNC(WaitRevisionFunc) {
         switch (ev->GetTypeRewrite()) {
-            HFunc(NEtcd::TEvQueryResult, Handle);
-            HFunc(NEtcd::TEvQueryError, Handle);
+            HFunc(TEvReturnRevision, Handle);
+            HFunc(TEvQueryError, Handle);
         }
     }
 
-    void Handle(NEtcd::TEvQueryResult::TPtr &ev, const TActorContext& ctx) {
+    STFUNC(WaitResultFunc) {
+        switch (ev->GetTypeRewrite()) {
+            HFunc(TEvQueryResult, Handle);
+            HFunc(TEvQueryError, Handle);
+        }
+    }
+
+    void Handle(TEvReturnRevision::TPtr &ev, const TActorContext& ctx) {
+        Revision = ev->Get()->Revision;
+        SendDatabaseRequest(ctx);
+    }
+
+    void Handle(TEvQueryResult::TPtr &ev, const TActorContext& ctx) {
+        if (!this->RequiredNextRevision()) {
+            if (auto parser = NYdb::TResultSetParser(ev->Get()->Results.back()); parser.TryNextRow()) {
+                Revision = NYdb::TValueParser(parser.GetValue(0)).GetInt64();
+            }
+        }
         ReplyWith(ev->Get()->Results, ctx);
     }
 
-    void Handle(NEtcd::TEvQueryError::TPtr &ev, const TActorContext& ctx) {
+    void Handle(TEvQueryError::TPtr &ev, const TActorContext& ctx) {
         TryToRollbackRevision();
         std::ostringstream err;
         Dump(err) << " SQL error received:" << std::endl << ev->Get()->Issues.ToString() << std::endl;
@@ -961,8 +1005,8 @@ private:
 
     void ReplyWith(const NYdb::TResultSets& results, const TActorContext& ctx) final {
         const auto watcher = Stuff->Watchtower;
-        const auto notifier = [&watcher, &ctx](std::string&& key, i64 revision, NEtcd::TData&& oldData, NEtcd::TData&& newData) {
-            ctx.Send(watcher, std::make_unique<NEtcd::TEvChange>(std::move(key), revision, std::move(oldData), std::move(newData)));
+        const auto notifier = [&watcher, &ctx](std::string&& key, i64 revision, TData&& oldData, TData&& newData) {
+            ctx.Send(watcher, std::make_unique<TEvChange>(std::move(key), revision, std::move(oldData), std::move(newData)));
         };
 
         auto response = Put.MakeResponse(Revision, results, notifier);
@@ -979,6 +1023,10 @@ private:
 
     std::ostream& Dump(std::ostream& out) const final {
         return Put.Dump(out);
+    }
+
+    bool RequiredNextRevision() const final {
+        return true;
     }
 
     TPut Put;
@@ -1004,8 +1052,8 @@ private:
 
     void ReplyWith(const NYdb::TResultSets& results, const TActorContext& ctx) final {
         const auto watcher = Stuff->Watchtower;
-        const auto notifier = [&watcher, &ctx](std::string&& key, i64 revision, NEtcd::TData&& oldData, NEtcd::TData&& newData) {
-            ctx.Send(watcher, std::make_unique<NEtcd::TEvChange>(std::move(key), revision, std::move(oldData), std::move(newData)));
+        const auto notifier = [&watcher, &ctx](std::string&& key, i64 revision, TData&& oldData, TData&& newData) {
+            ctx.Send(watcher, std::make_unique<TEvChange>(std::move(key), revision, std::move(oldData), std::move(newData)));
         };
 
         auto response = DeleteRange.MakeResponse(Revision, results, notifier);
@@ -1018,6 +1066,10 @@ private:
 
     std::ostream& Dump(std::ostream& out) const final {
         return DeleteRange.Dump(out);
+    }
+
+    bool RequiredNextRevision() const final {
+        return true;
     }
 
     TDeleteRange DeleteRange;
@@ -1039,7 +1091,7 @@ private:
     void MakeQueryWithParams(std::ostream& sql, NYdb::TParamsBuilder& params) final {
         AddParam("Revision", params, Revision);
 
-        TTxn::TKeysSet keys;
+        TKeysSet keys;
         Txn.GetKeys(keys);
         size_t resultsCounter = 0U, paramsCounter = 0U;
         if (keys.empty()) {
@@ -1056,8 +1108,8 @@ private:
 
     void ReplyWith(const NYdb::TResultSets& results, const TActorContext& ctx) final {
         const auto watcher = Stuff->Watchtower;
-        const auto notifier = [&watcher, &ctx](std::string&& key, i64 revision, NEtcd::TData&& oldData, NEtcd::TData&& newData) {
-            ctx.Send(watcher, std::make_unique<NEtcd::TEvChange>(std::move(key), revision, std::move(oldData), std::move(newData)));
+        const auto notifier = [&watcher, &ctx](std::string&& key, i64 revision, TData&& oldData, TData&& newData) {
+            ctx.Send(watcher, std::make_unique<TEvChange>(std::move(key), revision, std::move(oldData), std::move(newData)));
         };
 
         auto response = Txn.MakeResponse(Revision, results, notifier);
@@ -1074,6 +1126,10 @@ private:
 
     std::ostream& Dump(std::ostream& out) const final {
         return Txn.Dump(out);
+    }
+
+    bool RequiredNextRevision() const final {
+        return !Txn.IsReadOnly();
     }
 
     TTxn Txn;
@@ -1101,11 +1157,13 @@ private:
     }
 
     void MakeQueryWithParams(std::ostream& sql, NYdb::TParamsBuilder& params) final {
+        const auto& revisionParamName = AddParam("Revision", params, KeyRevision);
         sql << "$Trash = select c.key as key, c.modified as modified from `history` as c inner join (" << std::endl;
         sql << "select max_by((`key`, `modified`), `modified`) as pair from `history`" << std::endl;
-        sql << "where `modified` < " << AddParam("Revision", params, KeyRevision) << " and 0L = `version` group by `key`" << std::endl;
+        sql << "where `modified` < " << revisionParamName << " and 0L = `version` group by `key`" << std::endl;
         sql << ") as keys on keys.pair.0 = c.key where c.modified <= keys.pair.1;" << std::endl;
         sql << "delete from `history` on select * from $Trash;" << std::endl;
+        sql << "delete from `commited` where " << revisionParamName << " >= `revision`;" << std::endl;
         if (Physical) {
             sql << "select count(*) from $Trash;" << std::endl;
         }
@@ -1224,8 +1282,8 @@ private:
 
         if constexpr (NotifyWatchtower) {
             i64 deleted = 0ULL;
-            for (auto parser = NYdb::TResultSetParser(results.back()); parser.TryNextRow(); ++deleted) {
-                NEtcd::TData oldData;
+            for (auto parser = NYdb::TResultSetParser(results[1U]); parser.TryNextRow(); ++deleted) {
+                TData oldData;
                 oldData.Value = NYdb::TValueParser(parser.GetValue("value")).GetString();
                 oldData.Created = NYdb::TValueParser(parser.GetValue("created")).GetInt64();
                 oldData.Modified = NYdb::TValueParser(parser.GetValue("modified")).GetInt64();
@@ -1233,7 +1291,7 @@ private:
                 oldData.Lease = NYdb::TValueParser(parser.GetValue("lease")).GetInt64();
                 auto key = NYdb::TValueParser(parser.GetValue("key")).GetString();
 
-                ctx.Send(Stuff->Watchtower, std::make_unique<NEtcd::TEvChange>(std::move(key), Revision, std::move(oldData)));
+                ctx.Send(Stuff->Watchtower, std::make_unique<TEvChange>(std::move(key), Revision, std::move(oldData)));
             }
 
             if (!deleted)
@@ -1290,7 +1348,7 @@ private:
         response.set_grantedttl(exists ? NYdb::TValueParser(parser.GetValue("granted")).GetInt64() : 0LL);
 
         if (Keys) {
-            for (auto parser = NYdb::TResultSetParser(results.back()); parser.TryNextRow();) {
+            for (auto parser = NYdb::TResultSetParser(results[1U]); parser.TryNextRow();) {
                 response.add_keys(NYdb::TValueParser(parser.GetValue(0)).GetString());
             }
         }
@@ -1326,7 +1384,7 @@ private:
         etcdserverpb::LeaseLeasesResponse response;
         response.mutable_header()->set_revision(Revision);
 
-        for (auto parser = NYdb::TResultSetParser(results.back()); parser.TryNextRow();) {
+        for (auto parser = NYdb::TResultSetParser(results.front()); parser.TryNextRow();) {
             response.add_leases()->set_id(NYdb::TValueParser(parser.GetValue(0)).GetInt64());
         }
 

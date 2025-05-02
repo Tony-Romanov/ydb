@@ -38,17 +38,20 @@ enum Ev : ui32 {
     Changes,
     Cancel,
 
+    RequestRevision,
+    ReturnRevision,
+
     End
 };
 
 struct TEvQueryResult : public NActors::TEventLocal<TEvQueryResult, Ev::QueryResult> {
-    TEvQueryResult(const NYdb::TResultSets& result = {}): Results(result) {}
+    explicit TEvQueryResult(const NYdb::TResultSets& result = {}): Results(result) {}
 
     const NYdb::TResultSets Results;
 };
 
 struct TEvQueryError : public NActors::TEventLocal<TEvQueryError, Ev::QueryError> {
-    TEvQueryError(const NYdb::NIssue::TIssues& issues): Issues(issues) {}
+    explicit TEvQueryError(const NYdb::NIssue::TIssues& issues): Issues(issues) {}
 
     const NYdb::NIssue::TIssues Issues;
 };
@@ -81,7 +84,7 @@ struct TChange {
 
 struct TEvChange : public TChange, public NActors::TEventLocal<TEvChange, Ev::Change> {
     using TChange::TChange;
-    TEvChange(const TEvChange& put) : TChange(put) {}
+    explicit TEvChange(const TEvChange& put) : TChange(put) {}
 };
 
 struct TEvChanges : public NActors::TEventLocal<TEvChanges, Ev::Changes> {
@@ -100,7 +103,7 @@ class TEtcdRequestStreamWrapper
 public:
     using IStreamCtx = NKikimr::NGRpcServer::IGRpcStreamingContext<TReq, TRes>;
 
-    TEtcdRequestStreamWrapper(TIntrusivePtr<IStreamCtx> ctx)
+    explicit TEtcdRequestStreamWrapper(TIntrusivePtr<IStreamCtx> ctx)
         : Ctx_(ctx)
     {}
 
@@ -109,6 +112,22 @@ public:
     }
 private:
     const TIntrusivePtr<IStreamCtx> Ctx_;
+};
+
+using TKeysSet = std::set<std::pair<std::string, std::string>>;
+
+struct TEvRequestRevision : public NActors::TEventLocal<TEvRequestRevision, Ev::RequestRevision> {
+    explicit TEvRequestRevision(TKeysSet&& keysSet) : KeysSet(std::move(keysSet)) {}
+
+    explicit TEvRequestRevision(const std::string_view& key, const std::string_view& rangeEnd = {}) : KeysSet{std::make_pair(std::string(key), std::string(rangeEnd))} {}
+
+    const TKeysSet KeysSet;
+};
+
+struct TEvReturnRevision : public NActors::TEventLocal<TEvReturnRevision, Ev::ReturnRevision> {
+    explicit TEvReturnRevision(const i64 revision) : Revision(revision) {}
+
+    const i64 Revision;
 };
 
 using TEvWatchRequest = TEtcdRequestStreamWrapper<Ev::Watch, etcdserverpb::WatchRequest, etcdserverpb::WatchResponse>;
