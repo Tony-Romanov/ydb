@@ -103,18 +103,23 @@ private:
     ui16 GRpcPort_;
 };
 
-void MakeTables(auto &channel) {
-    const auto stub = Ydb::Query::V1::QueryService::NewStub(channel);
-    Ydb::Query::ExecuteQueryRequest request;
-    request.set_exec_mode(Ydb::Query::EXEC_MODE_EXECUTE);
-    request.mutable_query_content()->set_text(NEtcd::GetCreateTablesSQL(std::string("PRAGMA TablePathPrefix='/Root';\n")));
-
+void Execute(const std::string &query, const std::unique_ptr<Ydb::Query::V1::QueryService::Stub> &service) {
     grpc::ClientContext executeCtx;
     Ydb::Query::ExecuteQueryResponsePart response;
-    auto reader = stub->ExecuteQuery(&executeCtx, request);
-    while (reader->Read(&response)) {
+
+    Ydb::Query::ExecuteQueryRequest request;
+    request.set_exec_mode(Ydb::Query::EXEC_MODE_EXECUTE);
+    request.mutable_query_content()->set_text(query);
+    for (const auto reader = service->ExecuteQuery(&executeCtx, request); reader->Read(&response);) {
         UNIT_ASSERT_VALUES_EQUAL(response.status(), Ydb::StatusIds::SUCCESS);
     }
+}
+
+void MakeTables(auto &channel) {
+    const auto stub = Ydb::Query::V1::QueryService::NewStub(channel);
+    const std::string prefix("PRAGMA TablePathPrefix='/Root';\n");
+    Execute(NEtcd::GetCreateTablesSQL(prefix), stub);
+    Execute(NEtcd::GetInitializeTablesSQL(prefix), stub);
 }
 
 void MakeSimpleTest(std::function<void(const std::unique_ptr<etcdserverpb::KV::Stub>&)> etcd)
