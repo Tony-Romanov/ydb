@@ -199,6 +199,10 @@ private:
         return Range.Dump(out);
     }
 
+    TKeysSet GetAffectedKeysSet() const final {
+        return {{Range.Key, Range.RangeEnd}};
+    }
+
     TRange Range;
 };
 
@@ -246,6 +250,10 @@ private:
         return true;
     }
 
+    TKeysSet GetAffectedKeysSet() const final {
+        return {{Put.Key, {}}};
+    }
+
     TPut Put;
 };
 
@@ -286,6 +294,10 @@ private:
 
     bool RequiredNextRevision() const final {
         return true;
+    }
+
+    TKeysSet GetAffectedKeysSet() const final {
+        return {{DeleteRange.Key, DeleteRange.RangeEnd}};
     }
 
     TDeleteRange DeleteRange;
@@ -344,6 +356,12 @@ private:
 
     bool RequiredNextRevision() const final {
         return !Txn.IsReadOnly();
+    }
+
+    TKeysSet GetAffectedKeysSet() const final {
+        TKeysSet keys;
+        Txn.GetKeys(keys);
+        return keys;
     }
 
     TTxn Txn;

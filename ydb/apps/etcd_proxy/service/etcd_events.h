@@ -117,11 +117,11 @@ private:
 using TKeysSet = std::set<std::pair<std::string, std::string>>;
 
 struct TEvRequestRevision : public NActors::TEventLocal<TEvRequestRevision, Ev::RequestRevision> {
-    explicit TEvRequestRevision(TKeysSet&& keysSet) : KeysSet(std::move(keysSet)) {}
+    explicit TEvRequestRevision(TKeysSet&& keysSet = {}) : KeysSet(std::move(keysSet)) {}
 
     explicit TEvRequestRevision(const std::string_view& key, const std::string_view& rangeEnd = {}) : KeysSet{std::make_pair(std::string(key), std::string(rangeEnd))} {}
 
-    const TKeysSet KeysSet;
+    TKeysSet KeysSet;
 };
 
 struct TEvReturnRevision : public NActors::TEventLocal<TEvReturnRevision, Ev::ReturnRevision> {

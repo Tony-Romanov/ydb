@@ -24,7 +24,8 @@ public:
         Stuff->MainGate = SelfId();
     }
 private:
-    std::deque<std::tuple<TKeysSet, std::vector<TActorId>>> Queue;
+    using TActorsList = std::vector<TActorId>;
+    std::deque<std::tuple<TKeysSet, TActorsList>> Queue;
 
     STFUNC(StateFunc) {
         switch (ev->GetTypeRewrite()) {
@@ -35,11 +36,41 @@ private:
         }
     }
 
+    static bool HasIntersection(const TKeysSet& lhs, const TKeysSet& rhs) {
+        for (auto i = lhs.cbegin(), j = rhs.cbegin(); lhs.cend() != i && rhs.cend() != j;) {
+            if (*i < *j) {
+                if (!i->second.empty() && (Endless == i->second || i->second >= j->first))
+                    return true;
+                else
+                    i = lhs.lower_bound(*j);
+            } else if (*i > *j) {
+                if (!j->second.empty() && (Endless == j->second || j->second >= i->first))
+                    return true;
+                else
+                    j = rhs.lower_bound(*i);
+            } else
+                return true;
+        }
+
+        return false;
+    }
+
     void Handle(TEvRequestRevision::TPtr &ev) {
-        const bool send = Queue.empty();
-        Queue.emplace_back(ev->Get()->KeysSet, std::vector<TActorId>(1U, ev->Sender));
-        if (send)
+        if (Queue.empty()) {
+            Queue.emplace_back(std::move(ev->Get()->KeysSet), TActorsList(1U, ev->Sender));
             RequestNextRevision();
+        } else {
+            if (!ev->Get()->KeysSet.empty()) {
+                for (auto it = Queue.begin(); Queue.end() > it; ++it) {
+                    if (auto& keys = std::get<TKeysSet>(*it); !keys.empty() && (!BatchLimit || BatchLimit > std::get<TActorsList>(*it).size()) && !HasIntersection(ev->Get()->KeysSet, keys)) {
+                        keys.merge(std::move(ev->Get()->KeysSet));
+                        std::get<TActorsList>(*it).emplace_back(ev->Sender);
+                        return;
+                    }
+                }
+            }
+            Queue.emplace_back(std::move(ev->Get()->KeysSet), TActorsList(1U, ev->Sender));
+        }
     }
 
     void Handle(TEvQueryResult::TPtr &ev, const TActorContext& ctx) {

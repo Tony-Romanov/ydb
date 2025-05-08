@@ -9,6 +9,8 @@ namespace NEtcd {
 
 constexpr bool NotifyWatchtower = true;
 
+constexpr auto BatchLimit = 1ULL;
+
 constexpr auto Endless = "\0"sv;
 
 struct TSharedStuff {
