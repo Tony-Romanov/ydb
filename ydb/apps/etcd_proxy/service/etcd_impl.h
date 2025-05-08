@@ -17,6 +17,8 @@ namespace NEtcd {
     NActors::IActor* MakeLeaseTimeToLive(std::unique_ptr<NKikimr::NGRpcService::IRequestCtx> p, TSharedStuff::TPtr stuff);
     NActors::IActor* MakeLeaseLeases(std::unique_ptr<NKikimr::NGRpcService::IRequestCtx> p, TSharedStuff::TPtr stuff);
 
+    std::string GetParamName(const std::string_view& name, size_t* counter = nullptr);
+
     template<typename TValueType>
     std::string AddParam(const std::string_view& name, NYdb::TParamsBuilder& params, const TValueType& value, size_t* counter = nullptr);
 

@@ -36,7 +36,7 @@ private:
     }
 
     void Handle(TEvRequestRevision::TPtr &ev) {
-        const bool send = Queue.empty() && Current.empty();
+        const bool send = Queue.empty();
         Queue.emplace_back(ev->Get()->KeysSet, std::vector<TActorId>(1U, ev->Sender));
         if (send)
             RequestNextRevision();
@@ -48,27 +48,23 @@ private:
             revision = NYdb::TValueParser(parser.GetValue(0)).GetInt64();
         }
 
-        for (const auto& sender : Current)
+        for (const auto& sender : std::get<std::vector<TActorId>>(std::move(Queue.front())))
             ctx.Send(sender, new TEvReturnRevision(revision));
-        Current.clear();
+        Queue.pop_front();
         RequestNextRevision();
     }
 
     void Handle(TEvQueryError::TPtr &ev, const TActorContext& ctx) {
         std::cout << "Get next revision SQL error received " << ev->Get()->Issues.ToString() << std::endl;
-
-        for (const auto& sender : Current)
+        for (const auto& sender : std::get<std::vector<TActorId>>(std::move(Queue.front())))
             ctx.Send(sender, new TEvQueryError(ev->Get()->Issues));
-        Current.clear();
+        Queue.pop_front();
         RequestNextRevision();
     }
 
     void RequestNextRevision() {
         if (Queue.empty())
             return;
-
-        Current = std::get<std::vector<TActorId>>(std::move(Queue.front()));
-        Queue.pop_front();
 
         TQueryClient::TQueryResultFunc callback = [query = Query](TQueryClient::TSession session) -> TAsyncExecuteQueryResult {
             return session.ExecuteQuery(query, TTxControl::BeginTx().CommitTx());
@@ -87,8 +83,6 @@ private:
     const TIntrusivePtr<NMonitoring::TDynamicCounters> Counters;
     const TSharedStuff::TPtr Stuff;
     const std::string Query;
-
-    std::vector<TActorId> Current;
 };
 
 }

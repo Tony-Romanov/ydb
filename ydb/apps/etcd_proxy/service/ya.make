@@ -5,6 +5,7 @@ SRCS(
     etcd_gate.cpp
     etcd_grpc.cpp
     etcd_impl.cpp
+    etcd_oper.cpp
     etcd_shared.cpp
     etcd_watch.cpp
 )
