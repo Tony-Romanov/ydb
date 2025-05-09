@@ -7,9 +7,9 @@
 
 namespace NEtcd {
 
-constexpr bool NotifyWatchtower = true;
+constexpr bool NotifyWatchtower = false;
 
-constexpr auto BatchLimit = 1ULL;
+constexpr auto BatchLimit = 7ULL;
 
 constexpr auto Endless = "\0"sv;
 

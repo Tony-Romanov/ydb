@@ -1,10 +1,35 @@
 #pragma once
 
-#include "etcd_events.h"
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/query/client.h>
 
 #include <ydb/apps/etcd_proxy/proto/rpc.grpc.pb.h>
 
 namespace NEtcd {
+
+using TKeysSet = std::set<std::pair<std::string, std::string>>;
+
+using TGenerator = std::function<void (std::ostream& sql, NYdb::TParamsBuilder& params, size_t* paramsCounter, size_t* resultsCounter)>;
+
+struct TData {
+    std::string Value;
+    i64 Created = 0LL, Modified = 0LL, Version = 0LL, Lease = 0LL;
+};
+
+struct TChange {
+    TChange(std::string&& key, i64 revision, TData&& oldData, TData&& newData = {})
+        : Key(std::move(key)), Revision(revision), OldData(std::move(oldData)), NewData(std::move(newData))
+    {}
+
+    struct TOrder {
+        bool operator()(const TChange& lhs, const TChange& rhs) const {
+            return lhs.Revision < rhs.Revision;
+        }
+    };
+
+    std::string Key;
+    i64 Revision = 0LL;
+    TData OldData, NewData;
+};
 
 struct TOperation {
     size_t ResultIndex = 0ULL;
@@ -26,7 +51,7 @@ struct TRange : public TOperation {
 
     std::string Parse(const etcdserverpb::RangeRequest& rec);
 
-    void MakeQueryWithParams(std::ostream& sql, const std::string_view& keyFilter, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
+    void MakeSimpleQueryWithParams(std::ostream& sql, const std::string_view& keyFilter, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
 
     void MakeQueryWithParams(std::ostream& sql, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
     etcdserverpb::RangeResponse MakeResponse(i64 revision, const NYdb::TResultSets& results) const;
@@ -46,7 +71,7 @@ struct TPut : public TOperation {
 
     std::string Parse(const etcdserverpb::PutRequest& rec);
 
-    void MakeQueryWithParams(std::ostream& sql, const std::string_view& keyParamName, const std::string_view& keyFilter, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
+    void MakeSimpleQueryWithParams(std::ostream& sql, const std::string_view& keyParamName, const std::string_view& keyFilter, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
 
     void MakeQueryWithParams(std::ostream& sql, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
 
@@ -62,7 +87,7 @@ struct TDeleteRange : public TOperation {
 
     std::string Parse(const etcdserverpb::DeleteRangeRequest& rec);
 
-    void MakeQueryWithParams(std::ostream& sql, const std::string_view& keyFilter, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
+    void MakeSimpleQueryWithParams(std::ostream& sql, const std::string_view& keyFilter, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
 
     void MakeQueryWithParams(std::ostream& sql, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
 
@@ -98,14 +123,14 @@ struct TTxn : public TOperation {
 
     bool IsReadOnly() const;
 
-    void GetKeys(TKeysSet& keys) const;
+    TKeysSet GetKeys() const;
 
     template<class TOperation, class TSrc>
     static std::string Parse(std::vector<TRequestOp>& operations, const TSrc& src);
 
     std::string Parse(const etcdserverpb::TxnRequest& rec);
 
-    void MakeQueryWithParams(std::ostream& sql, const std::string_view& keyParamName, bool singleKey, const std::string_view& keyFilter, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
+    void MakeSimpleQueryWithParams(std::ostream& sql, const std::string_view& keyParamName, bool singleKey, const std::string_view& keyFilter, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
 
     void MakeQueryWithParams(std::ostream& sql, NYdb::TParamsBuilder& params, size_t* paramsCounter = nullptr, size_t* resultsCounter = nullptr, const std::string_view& txnFilter = {});
 

@@ -2,19 +2,12 @@
 
 #include <ydb/core/base/events.h>
 
-#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/query/client.h>
-
-#include <ydb/apps/etcd_proxy/proto/rpc.grpc.pb.h>
-
 #include <ydb/core/grpc_services/grpc_helper.h>
 #include <ydb/core/grpc_services/base/base.h>
 
-namespace NEtcd {
+#include "etcd_oper.h"
 
-struct TData {
-    std::string Value;
-    i64 Created = 0LL, Modified = 0LL, Version = 0LL, Lease = 0LL;
-};
+namespace NEtcd {
 
 enum class EWatchKind : ui8 {
     Unsubscribe = 0,
@@ -41,6 +34,8 @@ enum Ev : ui32 {
     RequestRevision,
     ReturnRevision,
 
+    GiveOperation,
+
     End
 };
 
@@ -64,22 +59,6 @@ struct TEvSubscribe : public NActors::TEventLocal<TEvSubscribe, Ev::Subscribe> {
     TEvSubscribe(std::string_view key = {}, std::string_view rangeEnd = {}, EWatchKind kind = EWatchKind::Unsubscribe, bool withPrevious = false)
         : Key(key), RangeEnd(rangeEnd), Kind(kind), WithPrevious(withPrevious)
     {}
-};
-
-struct TChange {
-    TChange(std::string&& key, i64 revision, TData&& oldData, TData&& newData = {})
-        : Key(std::move(key)), Revision(revision), OldData(std::move(oldData)), NewData(std::move(newData))
-    {}
-
-    struct TOrder {
-        bool operator()(const TChange& lhs, const TChange& rhs) const {
-            return lhs.Revision < rhs.Revision;
-        }
-    };
-
-    std::string Key;
-    i64 Revision = 0LL;
-    TData OldData, NewData;
 };
 
 struct TEvChange : public TChange, public NActors::TEventLocal<TEvChange, Ev::Change> {
@@ -114,8 +93,6 @@ private:
     const TIntrusivePtr<IStreamCtx> Ctx_;
 };
 
-using TKeysSet = std::set<std::pair<std::string, std::string>>;
-
 struct TEvRequestRevision : public NActors::TEventLocal<TEvRequestRevision, Ev::RequestRevision> {
     explicit TEvRequestRevision(TKeysSet&& keysSet = {}) : KeysSet(std::move(keysSet)) {}
 
@@ -128,6 +105,18 @@ struct TEvReturnRevision : public NActors::TEventLocal<TEvReturnRevision, Ev::Re
     explicit TEvReturnRevision(const i64 revision) : Revision(revision) {}
 
     const i64 Revision;
+};
+
+struct TEvGiveOperation : public NActors::TEventLocal<TEvGiveOperation, Ev::GiveOperation> {
+    using TSetter = std::function<void (TGenerator&& generator)>;
+    using TGuard = std::shared_ptr<void>;
+
+    TEvGiveOperation(TSetter&& setter, const TGuard& guard)
+        : Setter(std::move(setter)), Guard(guard)
+    {}
+
+    const TSetter Setter;
+    const TGuard Guard;
 };
 
 using TEvWatchRequest = TEtcdRequestStreamWrapper<Ev::Watch, etcdserverpb::WatchRequest, etcdserverpb::WatchResponse>;

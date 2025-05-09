@@ -1,6 +1,7 @@
 #include "etcd_impl.h"
-#include "etcd_shared.h"
 #include "etcd_oper.h"
+#include "etcd_shared.h"
+#include "etcd_events.h"
 
 #include <ydb/apps/etcd_proxy/proto/rpc.grpc.pb.h>
 
@@ -60,6 +61,8 @@ private:
 
     virtual std::ostream& Dump(std::ostream& out) const = 0;
 
+    virtual TGenerator MakeGenerator() { return {}; }
+
     TQueryClient::TQueryResultFunc GetQueryResultFunc() {
         NYdb::TParamsBuilder params;
         if (this->RequiredNextRevision())
@@ -106,6 +109,7 @@ private:
     STFUNC(WaitRevisionFunc) {
         switch (ev->GetTypeRewrite()) {
             HFunc(TEvReturnRevision, Handle);
+            hFunc(TEvGiveOperation, Handle);
             HFunc(TEvQueryError, Handle);
         }
     }
@@ -120,6 +124,11 @@ private:
     void Handle(TEvReturnRevision::TPtr &ev, const TActorContext& ctx) {
         Revision = ev->Get()->Revision;
         SendDatabaseRequest(ctx);
+    }
+
+    void Handle(TEvGiveOperation::TPtr &ev) {
+        ev->Get()->Setter(this->MakeGenerator());
+        this->Become(&TEtcdRequestGrpc::WaitResultFunc);
     }
 
     void Handle(TEvQueryResult::TPtr &ev, const TActorContext& ctx) {
@@ -174,6 +183,8 @@ using TEvLeaseRevokeRequest = TGrpcRequestNoOperationCall<etcdserverpb::LeaseRev
 using TEvLeaseTimeToLiveRequest = TGrpcRequestNoOperationCall<etcdserverpb::LeaseTimeToLiveRequest, etcdserverpb::LeaseTimeToLiveResponse>;
 using TEvLeaseLeasesRequest = TGrpcRequestNoOperationCall<etcdserverpb::LeaseLeasesRequest, etcdserverpb::LeaseLeasesResponse>;
 
+using namespace std::placeholders;
+
 class TRangeRequest
     : public TEtcdRequestGrpc<TRangeRequest, TEvRangeKVRequest, true> {
 public:
@@ -201,6 +212,10 @@ private:
 
     TKeysSet GetAffectedKeysSet() const final {
         return {{Range.Key, Range.RangeEnd}};
+    }
+
+    TGenerator MakeGenerator() final {
+        return std::bind(&TRange::MakeQueryWithParams, std::ref(Range), _1, _2, _3, _4, std::string_view());
     }
 
     TRange Range;
@@ -254,6 +269,10 @@ private:
         return {{Put.Key, {}}};
     }
 
+    TGenerator MakeGenerator() final {
+        return std::bind(&TPut::MakeQueryWithParams, std::ref(Put), _1, _2, _3, _4, std::string_view());
+    }
+
     TPut Put;
 };
 
@@ -300,6 +319,10 @@ private:
         return {{DeleteRange.Key, DeleteRange.RangeEnd}};
     }
 
+    TGenerator MakeGenerator() final {
+        return std::bind(&TDeleteRange::MakeQueryWithParams, std::ref(DeleteRange), _1, _2, _3, _4, std::string_view());
+    }
+
     TDeleteRange DeleteRange;
 };
 
@@ -317,18 +340,7 @@ private:
     }
 
     void MakeQueryWithParams(std::ostream& sql, NYdb::TParamsBuilder& params) final {
-        TKeysSet keys;
-        Txn.GetKeys(keys);
         size_t resultsCounter = 0U, paramsCounter = 0U;
-        if (keys.empty()) {
-            return Txn.MakeQueryWithParams(sql, {}, true, {}, params, &resultsCounter, &paramsCounter);
-        } else if (1U == keys.size()) {
-            std::ostringstream where;
-            where << " where ";
-            const auto& keyParamName = MakeSimplePredicate(keys.cbegin()->first, keys.cbegin()->second, where, params);
-            return Txn.MakeQueryWithParams(sql, keyParamName, keys.cbegin()->second.empty(), where.view(), params, &resultsCounter, &paramsCounter);
-        };
-
         return Txn.MakeQueryWithParams(sql, params, &resultsCounter, &paramsCounter);
     }
 
@@ -359,9 +371,11 @@ private:
     }
 
     TKeysSet GetAffectedKeysSet() const final {
-        TKeysSet keys;
-        Txn.GetKeys(keys);
-        return keys;
+        return Txn.GetKeys();
+    }
+
+    TGenerator MakeGenerator() final {
+        return std::bind(&TTxn::MakeQueryWithParams, std::ref(Txn), _1, _2, _3, _4, std::string_view());
     }
 
     TTxn Txn;
